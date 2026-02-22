@@ -89,3 +89,13 @@ action_dims: ???
 episode_lengths: ???
 seed_steps: ???
 bin_size: ???
+
+# error estimator
+error_model_lr: 1e-3
+error_model_training_iters: 1000
+error_model_eval_iters: 100
+error_model_eval_freq: 10
+error_model_data_steps: 1000
+error_model_batch_size: 256
+error_model_epochs: 10
+error_model_replay_buffer_size: 10000
