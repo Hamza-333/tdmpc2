@@ -2,12 +2,12 @@ defaults:
     - override hydra/launcher: submitit_local
 
 # environment
-task: dog-run
+task: ???
 obs: state
 episodic: false
 
 # evaluation
-checkpoint: ???
+checkpoint: /workspace/tdmpc2/checkpoints/myo-hand-key-turn-hard-3.pt
 eval_episodes: 10
 eval_freq: 50000
 
@@ -36,10 +36,11 @@ iterations: 6
 num_samples: 512
 num_elites: 64
 num_pi_trajs: 24
-horizon: 3
+horizon: ???
 min_std: 0.05
 max_std: 2
 temperature: 0.5
+error_penalty: 0.1
 
 # actor
 log_std_min: -10
@@ -64,14 +65,14 @@ dropout: 0.01
 simnorm_dim: 8
 
 # logging
-wandb_project: ???
+wandb_project: tdmpc2
 wandb_entity: ???
 wandb_silent: false
 enable_wandb: true
 save_csv: true
 
 # misc
-compile: true
+compile: false
 save_video: true
 save_agent: true
 seed: 1
@@ -82,7 +83,7 @@ task_title: ???
 multitask: ???
 tasks: ???
 obs_shape: ???
-action_dim: ???
+action_dim: 512
 episode_length: ???
 obs_shapes: ???
 action_dims: ???
@@ -91,11 +92,19 @@ seed_steps: ???
 bin_size: ???
 
 # error estimator
-error_model_lr: 1e-3
-error_model_training_iters: 1000
+error_model_lr: 1e-4
+error_model_training_iters: 500
 error_model_eval_iters: 100
 error_model_eval_freq: 10
-error_model_data_steps: 1000
-error_model_batch_size: 256
-error_model_epochs: 10
-error_model_replay_buffer_size: 10000
+error_model_data_steps: 2500
+error_model_batch_size: 512
+error_model_epochs: 500
+error_model_replay_buffer_size: 1000000
+error_model_save_freq: 20
+error_model_save_path: /workspace/tdmpc2/error_model_vector_checkpoints
+error_model_plot_dir: /workspace/tdmpc2/results/error_model_vector/
+error_model_log_dir: /workspace/tdmpc2/error_model_vector_logs
+error_model_checkpoint: /workspace/tdmpc2/error_model_vector_checkpoints/error_model_480.pth
+error_model_mode: eval
+
+eval_actions: true

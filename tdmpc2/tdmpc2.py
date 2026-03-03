@@ -6,6 +6,9 @@ from common.scale import RunningScale
 from common.world_model import WorldModel
 from common.layers import api_model_conversion
 from tensordict import TensorDict
+from error_estimator.estimator import ErrorEstimator
+import matplotlib.pyplot as plt
+import os
 
 
 class TDMPC2(torch.nn.Module):
@@ -20,6 +23,8 @@ class TDMPC2(torch.nn.Module):
 		self.cfg = cfg
 		self.device = torch.device('cuda:0')
 		self.model = WorldModel(cfg).to(self.device)
+		self.error_model = ErrorEstimator(cfg).to(self.device)
+		self.error_penalty = cfg.error_penalty
 		self.optim = torch.optim.Adam([
 			{'params': self.model._encoder.parameters(), 'lr': self.cfg.lr*self.cfg.enc_lr_scale},
 			{'params': self.model._dynamics.parameters()},
@@ -31,6 +36,7 @@ class TDMPC2(torch.nn.Module):
 		], lr=self.cfg.lr, capturable=True)
 		self.pi_optim = torch.optim.Adam(self.model._pi.parameters(), lr=self.cfg.lr, eps=1e-5, capturable=True)
 		self.model.eval()
+		self.error_model.eval()
 		self.scale = RunningScale(cfg)
 		self.cfg.iterations += 2*int(cfg.action_dim >= 20) # Heuristic for large action spaces
 		self.discount = torch.tensor(
@@ -42,7 +48,7 @@ class TDMPC2(torch.nn.Module):
 		if cfg.compile:
 			print('Compiling update function with torch.compile...')
 			self._update = torch.compile(self._update, mode="reduce-overhead")
-
+		self.z_imagined = []
 	@property
 	def plan(self):
 		_plan_val = getattr(self, "_plan_val", None)
@@ -137,6 +143,51 @@ class TDMPC2(torch.nn.Module):
 		return G + discount * (1-termination) * self.model.Q(z, action, task, return_type='avg')
 
 	@torch.no_grad()
+	def _estimate_error_aware_value(self, z, actions, task):
+
+		penalty = 0.5
+		G, discount = 0, 1
+		termination = torch.zeros(self.cfg.num_samples, 1, dtype=torch.float32, device=z.device)
+		total_error = 0
+		for t in range(self.cfg.horizon):
+			error = self.error_model(z, actions[t])
+			reward = math.two_hot_inv(self.model.reward(z, actions[t], task), self.cfg)
+			z = self.model.next(z, actions[t], task)
+			total_error += error.norm(dim=-1, keepdim=True)
+			z -= penalty * error
+			penalty *= 0.8
+			G = G + discount * (1-termination) * reward
+			discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
+			discount = discount * discount_update
+			if self.cfg.episodic:
+				termination = torch.clip(termination + (self.model.termination(z, task) > 0.5).float(), max=1.)
+		action, _ = self.model.pi(z, task)
+		return G + discount * (1-termination) * self.model.Q(z, action, task, return_type='avg')
+
+	@torch.no_grad()
+	def _estimate_uncertainty_aware_value(self, z, actions, task):
+		"""Estimate value of a trajectory starting at latent state z and executing given actions."""
+		G, discount = 0, 1
+		termination = torch.zeros(self.cfg.num_samples, 1, dtype=torch.float32, device=z.device)
+		noise = torch.randn_like(actions[0]) * 0.1
+		penalty = 0.1
+		sensitivity = 0
+		for t in range(self.cfg.horizon):
+			imagined_next_state = self.model.next(z, actions[t], task)
+			imagined_next_state_noisy = self.model.next(z, actions[t] + noise, task)
+			sensitivity += torch.norm(imagined_next_state - imagined_next_state_noisy, dim=-1)
+			reward = math.two_hot_inv(self.model.reward(z, actions[t], task), self.cfg)
+			z = self.model.next(z, actions[t], task)
+			G = G + discount * (1-termination) * reward
+			discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
+			discount = discount * discount_update
+			if self.cfg.episodic:
+				termination = torch.clip(termination + (self.model.termination(z, task) > 0.5).float(), max=1.)
+		action, _ = self.model.pi(z, task)
+
+		return G + discount * (1-termination) * self.model.Q(z, action, task, return_type='avg') - self.error_penalty * sensitivity.view(-1, 1)
+
+	@torch.no_grad()
 	def _plan(self, obs, t0=False, eval_mode=False, task=None):
 		"""
 		Plan a sequence of actions using the learned world model.
@@ -183,6 +234,8 @@ class TDMPC2(torch.nn.Module):
 
 			# Compute elite actions
 			value = self._estimate_value(z, actions, task).nan_to_num(0)
+			# value = self._estimate_error_aware_value(z, actions, task).nan_to_num(0)
+			# value = self._estimate_uncertainty_aware_value(z, actions, task).nan_to_num(0)
 			elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
 			elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]
 
@@ -204,7 +257,9 @@ class TDMPC2(torch.nn.Module):
 		if not eval_mode:
 			a = a + std * torch.randn(self.cfg.action_dim, device=std.device)
 		self._prev_mean.copy_(mean)
-		return a.clamp(-1, 1)
+		# return a.clamp(-1, 1)
+
+		return actions
 
 	def update_pi(self, zs, task):
 		"""

@@ -33,4 +33,4 @@ class ReplayBuffer(object):
             errors.append(np.array(e, copy=False))
         
         return np.array(states), np.array(next_states), np.array(actions), \
-            np.array(imagined_next_states).reshape(-1, 1), np.array(errors).reshape(-1, 1)
+            np.array(imagined_next_states).reshape(-1, 1), np.array(errors)

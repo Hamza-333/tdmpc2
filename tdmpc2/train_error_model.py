@@ -34,9 +34,10 @@ def train(cfg: dict):
 	print(colored('Work dir:', 'yellow', attrs=['bold']), cfg.work_dir)
 
 
-	os.makedirs(cfg.error_model_save_path, exist_ok=True)
-	os.makedirs(cfg.error_model_plot_dir, exist_ok=True)
-
+	os.makedirs(f'{cfg.error_model_save_path}/{cfg.task}/', exist_ok=True)
+	os.makedirs(f'{cfg.error_model_log_dir}/{cfg.task}/', exist_ok=True)
+	os.makedirs(f'{cfg.error_model_plot_dir}/{cfg.task}/plots', exist_ok=True)
+	
 	trainer_cls = TrainEstimator
 	trainer = trainer_cls(
 		cfg=cfg,
