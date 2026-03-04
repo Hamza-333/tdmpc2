@@ -27,6 +27,7 @@ dependencies:
     - moviepy==1.0.3
     - mujoco==3.1.2
     - numpy==1.24.4
+    - matplotlib==3.6.3
     - tensordict-nightly==2025.1.1
     - torchrl-nightly==2025.1.1
     - kornia==0.7.2
@@ -53,7 +54,7 @@ dependencies:
     # - git+https://github.com/Farama-Foundation/Metaworld.git@04be337a12305e393c0caf0cbf5ec7755c7c8feb
     ####################
     # MyoSuite:
-    # - myosuite
+    - myosuite
     ####################
     # Classic MuJoCo/Box2d:
     # - swig
