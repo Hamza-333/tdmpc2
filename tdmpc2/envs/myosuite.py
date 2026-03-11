@@ -51,7 +51,7 @@ def make_env(cfg):
 	assert cfg.obs == 'state', 'This task only supports state observations.'
 	import myosuite
 	from myosuite.utils import gym as gym_utils
-	env = gym_utils.make(MYOSUITE_TASKS[cfg.task])
+	env = gym_utils.make(MYOSUITE_TASKS[cfg.task], seed=1)
 	env = MyoSuiteWrapper(env, cfg)
 	env = Timeout(env, max_episode_steps=100)
 	# env.max_episode_steps = env._max_episode_steps
