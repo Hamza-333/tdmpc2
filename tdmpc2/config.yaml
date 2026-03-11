@@ -108,3 +108,4 @@ error_model_checkpoint: /workspace/tdmpc2/error_model_vector_checkpoints/error_m
 error_model_mode: eval
 
 eval_actions: true
+planner: ua

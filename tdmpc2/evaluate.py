@@ -70,15 +70,13 @@ def evaluate(cfg: dict):
     tasks = cfg.tasks if cfg.multitask else [cfg.task]
 
     if cfg.eval_actions:
-        # errors_per_step, rewards_per_step_actual, rewards_per_step_imagined = eval_actions(agent, env, cfg, penalty=0)
-        errors_per_step_corrected, rewards_per_step_actual_corrected, rewards_per_step_imagined_corrected = eval_actions(agent, env, cfg, penalty=0.5)
+        errors_per_step, rewards_per_step_actual, rewards_per_step_imagined, action_counts = eval_actions(agent, env, cfg, penalty=0)
 
-        # plot_results(errors_per_step.mean(axis=0), errors_per_step_corrected.mean(axis=0), cfg)
-
-        # plot_rewards(rewards_per_step_actual_corrected.mean(axis=0), rewards_per_step_imagined_corrected.mean(axis=0), cfg, file_name='rewards_comparison_error_corrected_key_turn.png')
-        # plot_rewards(rewards_per_step_actual.mean(axis=0), rewards_per_step_imagined.mean(axis=0), cfg, file_name='rewards_comparison_error_unchanged_key_turn.png')
-        # print("Mean planned errors per step:", errors_per_step.mean(axis=0))
-        # print("Mean planned errors per step corrected:", errors_per_step_corrected.mean(axis=0))
+        plot_rewards(rewards_per_step_actual.sum(axis=0)/(action_counts + 1e-10), rewards_per_step_imagined.sum(axis=0) / (action_counts + 1e-10), cfg, file_name='rewards_comparison_dog_run_reg.png')
+        print("Imagined Rewards:", rewards_per_step_imagined.sum(axis=0)/(action_counts + 1e-10))
+        print("Actual Rewards:", rewards_per_step_actual.sum(axis=0)/(action_counts + 1e-10))
+        print("Mean planned errors per step:", errors_per_step.sum(axis=0) / action_counts)
+        print("Horizon Counts", action_counts)
         return
     for task_idx, task in enumerate(tasks):
         if not cfg.multitask:
@@ -140,43 +138,37 @@ def eval_actions(agent, env, cfg, penalty):
     errors_per_step = np.zeros((100, cfg.horizon))
     rewards_per_step_actual = np.zeros((100, cfg.horizon))
     rewards_per_step_imagined = np.zeros((100, cfg.horizon))
+    action_counts = np.zeros(cfg.horizon)
 
     for i in range(100):
         obs, done, ep_reward, t = env.reset(task_idx=None), False, 0, 0
         z = agent.model.encode(obs.to(agent.device), task=None)
         errors_episode = []
         
-        # actions = agent.act(obs, t0=True, task=None, eval_mode=True)
-        actions = [env.rand_act() for _ in range(cfg.horizon)]
-        pen = penalty
+        actions = agent.act(obs, t0=True, task=None, eval_mode=True)
         for t, a in enumerate(actions):
+            action_counts[t] += 1
 
-            error = agent.error_model(z.unsqueeze(0).to(agent.device), a.unsqueeze(0).to(agent.device))
-            z = agent.model.next(z.to(agent.device), a.to(agent.device), task=None)
+            # Compute imagined reward before updating state
+            rewards_per_step_imagined[i, t] = math.two_hot_inv(agent.model.reward(z.to(agent.device), a.to(agent.device), task=None), agent.cfg)
+            
+            z = agent.model.next(z.to(agent.device), a.clamp(-1, 1).to(agent.device), task=None)
             
             new_obs, reward, done, info = env.step(a)
 
             encoded_new_obs = agent.model.encode(new_obs.to(agent.device), task=None)
             errors_per_step[i, t] = torch.norm(z - encoded_new_obs, dim=-1).cpu().item()
-            print("regular error:", torch.norm(z - encoded_new_obs, dim=-1).cpu().item())
-            # z -= pen * error
-            # pen *= 1
-            z -= error.squeeze(0)
-
-            print("error corrected", torch.norm((z) - encoded_new_obs, dim=-1).cpu().item())
 
             rewards_per_step_actual[i, t] = reward
-            rewards_per_step_imagined[i, t] = math.two_hot_inv(agent.model.reward(z.to(agent.device), a.to(agent.device), task=None), agent.cfg)
             if done:
                 break
-        print("------------------")
-    return errors_per_step, rewards_per_step_actual, rewards_per_step_imagined
+    return errors_per_step, rewards_per_step_actual, rewards_per_step_imagined, action_counts
 
 def plot_results(results, results_corrected, cfg):
     plt.plot(results, label='Planned Errors')
     plt.plot(results_corrected, label='Corrected Planned Errors')
     plt.title('Error Model Performance Over Time')
-    plt.xlabel('Evaluation Iteration')
+    plt.xlabel('Horizon')
     plt.ylabel('Mean Planned Error')
     ax = plt.gca()
     ax.set_yticks([0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5])
@@ -188,8 +180,8 @@ def plot_rewards(rewards_actual, rewards_imagined, cfg, file_name):
     plt.plot(rewards_actual, label='Actual Rewards')
     plt.plot(rewards_imagined, label='Imagined Rewards')
     plt.title('Actual vs Imagined Rewards Over Time')
-    plt.xlabel('Evaluation Iteration')
-    plt.ylabel('Reward')
+    plt.xlabel('Horizon')
+    plt.ylabel('Mean Reward')
     plt.legend()
     plt.savefig(os.path.join(f'{cfg.error_model_plot_dir}/{cfg.task}/plots/', file_name))
     plt.close()
