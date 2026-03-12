@@ -72,7 +72,7 @@ def evaluate(cfg: dict):
     if cfg.eval_actions:
         errors_per_step, rewards_per_step_actual, rewards_per_step_imagined, action_counts = eval_actions(agent, env, cfg, penalty=0)
 
-        plot_rewards(rewards_per_step_actual.sum(axis=0)/(action_counts + 1e-10), rewards_per_step_imagined.sum(axis=0) / (action_counts + 1e-10), cfg, file_name='rewards_comparison_dog_run_reg.png')
+        plot_rewards(rewards_per_step_actual.sum(axis=0)/(action_counts + 1e-10), rewards_per_step_imagined.sum(axis=0) / (action_counts + 1e-10), cfg, file_name=f'rewards_comparison_{cfg.task}_{cfg.planner}.png')
         print("Imagined Rewards:", rewards_per_step_imagined.sum(axis=0)/(action_counts + 1e-10))
         print("Actual Rewards:", rewards_per_step_actual.sum(axis=0)/(action_counts + 1e-10))
         print("Mean planned errors per step:", errors_per_step.sum(axis=0) / action_counts)
@@ -96,10 +96,16 @@ def evaluate(cfg: dict):
                 actions = agent.act(obs, t0=t == 0, task=task_idx, eval_mode=True)
                 # errors = eval_actions(obs, actions, agent, env)
                 # print("Errors during planning:", errors)
-                obs, reward, done, info = env.step(actions[0].clamp(-1,1))
+                # obs, reward, done, info = env.step(actions[0].clamp(-1,1))
+                for t in range(len(actions)-1):
+                    obs, reward, done, info = env.step(actions[t].clamp(-1,1))
+                    ep_reward += reward
+                    t += 1
+                    if done:
+                        break
 
-                ep_reward += reward
-                t += 1
+                # ep_reward += reward
+                # t += 1
 
                 if cfg.save_video:
                     frames.append(env.render())
@@ -109,7 +115,7 @@ def evaluate(cfg: dict):
 
             if cfg.save_video:
                 imageio.mimsave(
-                    os.path.join(video_dir, f'{task}-{i}.mp4'),
+                    os.path.join(video_dir, f'{task}-{i}-{cfg.planner}.mp4'),
                     frames,
                     fps=15
                 )
@@ -154,7 +160,7 @@ def eval_actions(agent, env, cfg, penalty):
             
             z = agent.model.next(z.to(agent.device), a.clamp(-1, 1).to(agent.device), task=None)
             
-            new_obs, reward, done, info = env.step(a)
+            new_obs, reward, done, info = env.step(a.clamp(-1, 1))
 
             encoded_new_obs = agent.model.encode(new_obs.to(agent.device), task=None)
             errors_per_step[i, t] = torch.norm(z - encoded_new_obs, dim=-1).cpu().item()
@@ -183,6 +189,8 @@ def plot_rewards(rewards_actual, rewards_imagined, cfg, file_name):
     plt.xlabel('Horizon')
     plt.ylabel('Mean Reward')
     plt.legend()
+    ax = plt.gca()
+    ax.set_yticks([0, 0.05, 0.1, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55])
     plt.savefig(os.path.join(f'{cfg.error_model_plot_dir}/{cfg.task}/plots/', file_name))
     plt.close()
 

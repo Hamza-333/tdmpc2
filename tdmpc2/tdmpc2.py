@@ -167,15 +167,15 @@ class TDMPC2(torch.nn.Module):
 		return G + discount * (1-termination) * self.model.Q(z, action, task, return_type='avg')
 
 	@torch.no_grad()
-	def _estimate_uncertainty_aware_value(self, z, actions, task, i):
+	def _estimate_uncertainty_aware_value(self, z, actions, task, i, increment):
 		"""Estimate value of a trajectory starting at latent state z and executing given actions."""
 		G, discount = 0, 1
 		termination = torch.zeros(self.cfg.num_samples, 1, dtype=torch.float32, device=z.device)
 		sensitivity = 0
 		threshold = 0.45
 		total_sensitivity = 0
-		increment = 0.3
-		increment_decay = 0.8
+
+
 		for t in range(self.cfg.horizon):
 			noise = torch.randn_like(actions[t]) * 0.5
 			imagined_next_state = self.model.next(z, actions[t], task)
@@ -184,10 +184,12 @@ class TDMPC2(torch.nn.Module):
 			total_sensitivity += sensitivity
 
 			topk_sensitive = torch.topk(-total_sensitivity, self.cfg.num_elites, dim=0).indices
+
 			# try log
-			if total_sensitivity[topk_sensitive].mean().cpu().item() >= (threshold + increment * i):
+			if total_sensitivity[topk_sensitive].mean().cpu().item() >= (threshold + increment):
+				# print(t+1)
 				break
-			increment *= increment_decay
+			# increment *= increment_decay
 
 			reward = math.two_hot_inv(self.model.reward(z, actions[t], task), self.cfg)
 			z = self.model.next(z, actions[t], task)
@@ -214,6 +216,7 @@ class TDMPC2(torch.nn.Module):
 		Returns:
 			torch.Tensor: Action to take in the environment.
 		"""
+		planning_dict = {}
 		# Sample policy trajectories
 		z = self.model.encode(obs, task)
 		if self.cfg.num_pi_trajs > 0:
@@ -233,7 +236,8 @@ class TDMPC2(torch.nn.Module):
 		actions = torch.empty(self.cfg.horizon, self.cfg.num_samples, self.cfg.action_dim, device=self.device)
 		if self.cfg.num_pi_trajs > 0:
 			actions[:, :self.cfg.num_pi_trajs] = pi_actions
-
+		weight = 0.3
+		weight_decay = 0.9
 		# Iterate MPPI
 		for _ in range(self.cfg.iterations):
 
@@ -247,7 +251,13 @@ class TDMPC2(torch.nn.Module):
 
 			# Compute elite actions with uncertainty awareness
 			# Issue was we were udpating action distribution of all 15 actions when we might have planned for 2 steps and the value estimate reflected 2 steps.
-			value, planned_horizon = self._estimate_uncertainty_aware_value(z, actions, task, _)
+			increment = weight * m.log(_+1)
+			value, planned_horizon = self._estimate_uncertainty_aware_value(z, actions, task, _, increment)
+			weight *= weight_decay
+			# planning_dict[planned_horizon] = planning_dict.get(planned_horizon, 0) + 1
+			# if planning_dict[planned_horizon] <= 3 and _ ==self.cfg.iterations-1:
+			# 	planned_horizon -= 1
+				# break
 			value = value.nan_to_num(0)
 			elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
 			elite_value, elite_actions = value[elite_idxs], actions[:planned_horizon, elite_idxs]
@@ -264,6 +274,7 @@ class TDMPC2(torch.nn.Module):
 				std = std * self.model._action_masks[task]
 
 		# Select action
+	
 		rand_idx = math.gumbel_softmax_sample(score.squeeze(1))
 		actions = torch.index_select(elite_actions, 1, rand_idx).squeeze(1)
 		a, std = actions[0], std[0]
