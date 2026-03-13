@@ -78,26 +78,27 @@ def evaluate(cfg: dict):
         print("Mean planned errors per step:", errors_per_step.sum(axis=0) / action_counts)
         print("Horizon Counts", action_counts)
         return
+    MAX_ACTIONS = 3
     for task_idx, task in enumerate(tasks):
         if not cfg.multitask:
             task_idx = None
 
         ep_rewards, ep_successes = [], []
         start_time = time.time()
-
+        total_num_actions = []
         for i in range(cfg.eval_episodes):
             obs, done, ep_reward, t = env.reset(task_idx=task_idx), False, 0, 0
 
             if cfg.save_video:
                 frames = [env.render()]
-
+            num_actions = []
             while not done:
                 ### Changed this to log planned errors
                 actions = agent.act(obs, t0=t == 0, task=task_idx, eval_mode=True)
-                # errors = eval_actions(obs, actions, agent, env)
-                # print("Errors during planning:", errors)
+
                 # obs, reward, done, info = env.step(actions[0].clamp(-1,1))
-                for t in range(len(actions)-1):
+                num_actions.append(len(actions))
+                for t in range(1):
                     obs, reward, done, info = env.step(actions[t].clamp(-1,1))
                     ep_reward += reward
                     t += 1
@@ -112,6 +113,7 @@ def evaluate(cfg: dict):
 
             ep_rewards.append(ep_reward)
             ep_successes.append(info['success'])
+            total_num_actions.append(num_actions)
 
             if cfg.save_video:
                 imageio.mimsave(
@@ -119,10 +121,12 @@ def evaluate(cfg: dict):
                     frames,
                     fps=15
                 )
-
+        for i in range(len(total_num_actions)):
+            print(f"Actions: {total_num_actions[i]} ---- Reward: {ep_rewards[i]} ---- Success: {ep_successes[i]}")
         ep_rewards = np.mean(ep_rewards)
         ep_successes = np.mean(ep_successes)
         total_time = time.time() - start_time
+
 
         if cfg.multitask:
             scores.append(ep_successes * 100 if task.startswith('mw-') else ep_rewards / 10)
@@ -156,7 +160,7 @@ def eval_actions(agent, env, cfg, penalty):
             action_counts[t] += 1
 
             # Compute imagined reward before updating state
-            rewards_per_step_imagined[i, t] = math.two_hot_inv(agent.model.reward(z.to(agent.device), a.to(agent.device), task=None), agent.cfg)
+            rewards_per_step_imagined[i, t] = math.two_hot_inv(agent.model.reward(z.to(agent.device), a.clamp(-1, 1).to(agent.device), task=None), agent.cfg)
             
             z = agent.model.next(z.to(agent.device), a.clamp(-1, 1).to(agent.device), task=None)
             
@@ -190,7 +194,8 @@ def plot_rewards(rewards_actual, rewards_imagined, cfg, file_name):
     plt.ylabel('Mean Reward')
     plt.legend()
     ax = plt.gca()
-    ax.set_yticks([0, 0.05, 0.1, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55])
+    # ax.set_yticks([0, 0.05, 0.1, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55])
+    os.makedirs(f'{cfg.error_model_plot_dir}/{cfg.task}/plots/', exist_ok=True)
     plt.savefig(os.path.join(f'{cfg.error_model_plot_dir}/{cfg.task}/plots/', file_name))
     plt.close()
 

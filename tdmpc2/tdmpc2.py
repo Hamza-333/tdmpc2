@@ -147,50 +147,32 @@ class TDMPC2(torch.nn.Module):
 		action, _ = self.model.pi(z, task)
 		return G + discount * (1-termination) * self.model.Q(z, action, task, return_type='avg')
 
-	@torch.no_grad()
-	def _estimate_error_aware_value(self, z, actions, task):
-
-		penalty = 0.5
-		G, discount = 0, 1
-		termination = torch.zeros(self.cfg.num_samples, 1, dtype=torch.float32, device=z.device)
-		total_error = 0
-		for t in range(self.cfg.horizon):
-			reward = math.two_hot_inv(self.model.reward(z, actions[t], task), self.cfg)
-			z = self.model.next(z, actions[t], task)
-
-			G = G + discount * (1-termination) * reward
-			discount_update = self.discount[torch.tensor(task)] if self.cfg.multitask else self.discount
-			discount = discount * discount_update
-			if self.cfg.episodic:
-				termination = torch.clip(termination + (self.model.termination(z, task) > 0.5).float(), max=1.)
-		action, _ = self.model.pi(z, task)
-		return G + discount * (1-termination) * self.model.Q(z, action, task, return_type='avg')
 
 	@torch.no_grad()
-	def _estimate_uncertainty_aware_value(self, z, actions, task, i, increment):
+	def _estimate_uncertainty_aware_value(self, z, actions, task, increment, un_early_stop, samples, max_h=None):
 		"""Estimate value of a trajectory starting at latent state z and executing given actions."""
 		G, discount = 0, 1
-		termination = torch.zeros(self.cfg.num_samples, 1, dtype=torch.float32, device=z.device)
+		termination = torch.zeros(samples, 1, dtype=torch.float32, device=z.device)
 		sensitivity = 0
-		threshold = 0.45
+		threshold = 1
 		total_sensitivity = 0
 
-
 		for t in range(self.cfg.horizon):
-			noise = torch.randn_like(actions[t]) * 0.5
-			imagined_next_state = self.model.next(z, actions[t], task)
-			imagined_next_state_noisy = self.model.next(z, (actions[t] + noise).clamp(-1, 1), task)
-			sensitivity = torch.norm(imagined_next_state - imagined_next_state_noisy, dim=-1)
-			total_sensitivity += sensitivity
+			if un_early_stop:
+				noise = torch.randn_like(actions[t]) * 0.5
+				imagined_next_state = self.model.next(z, actions[t], task)
+				imagined_next_state_noisy = self.model.next(z, (actions[t] + noise).clamp(-1, 1), task)
 
-			topk_sensitive = torch.topk(-total_sensitivity, self.cfg.num_elites, dim=0).indices
+				sensitivity = torch.norm(imagined_next_state - imagined_next_state_noisy, dim=-1)
+				total_sensitivity += sensitivity
 
-			# try log
-			if total_sensitivity[topk_sensitive].mean().cpu().item() >= (threshold + increment):
-				# print(t+1)
-				break
-			# increment *= increment_decay
+				topk_sensitive = torch.topk(-total_sensitivity, self.cfg.num_elites, dim=0).indices
 
+				# try log
+				if total_sensitivity[topk_sensitive].mean().cpu().item() >= (threshold + increment):
+					# print(t+1)
+					break
+			
 			reward = math.two_hot_inv(self.model.reward(z, actions[t], task), self.cfg)
 			z = self.model.next(z, actions[t], task)
 			G = G + discount * (1-termination) * reward
@@ -198,6 +180,8 @@ class TDMPC2(torch.nn.Module):
 			discount = discount * discount_update
 			if self.cfg.episodic:
 				termination = torch.clip(termination + (self.model.termination(z, task) > 0.5).float(), max=1.)
+			if max_h and t == max_h:
+				break
 		action, _ = self.model.pi(z, task)
 
 		return G + discount * (1-termination) * self.model.Q(z, action, task, return_type='avg'), t # return planned horizon
@@ -228,6 +212,7 @@ class TDMPC2(torch.nn.Module):
 			pi_actions[-1], _ = self.model.pi(_z, task)
 
 		# Initialize state and parameters
+		z_pi = z.repeat(self.cfg.num_pi_trajs, 1)
 		z = z.repeat(self.cfg.num_samples, 1)
 		mean = torch.zeros(self.cfg.horizon, self.cfg.action_dim, device=self.device)
 		std = torch.full((self.cfg.horizon, self.cfg.action_dim), self.cfg.max_std, dtype=torch.float, device=self.device)
@@ -236,9 +221,10 @@ class TDMPC2(torch.nn.Module):
 		actions = torch.empty(self.cfg.horizon, self.cfg.num_samples, self.cfg.action_dim, device=self.device)
 		if self.cfg.num_pi_trajs > 0:
 			actions[:, :self.cfg.num_pi_trajs] = pi_actions
-		weight = 0.3
-		weight_decay = 0.9
+		weight = 0.8 # 0.75
+		weight_decay = 1.5 # 1.5
 		# Iterate MPPI
+		pi_actions = actions[:, :self.cfg.num_pi_trajs]
 		for _ in range(self.cfg.iterations):
 
 			# Sample actions
@@ -252,12 +238,14 @@ class TDMPC2(torch.nn.Module):
 			# Compute elite actions with uncertainty awareness
 			# Issue was we were udpating action distribution of all 15 actions when we might have planned for 2 steps and the value estimate reflected 2 steps.
 			increment = weight * m.log(_+1)
-			value, planned_horizon = self._estimate_uncertainty_aware_value(z, actions, task, _, increment)
+			value, planned_horizon = self._estimate_uncertainty_aware_value(z, actions, task, increment, un_early_stop=True, samples=self.cfg.num_samples)
+			# second planning with only policy
+			max_h = planned_horizon + 3
+			value_pi, _ = self._estimate_uncertainty_aware_value(z_pi, pi_actions, task, increment, un_early_stop=False, samples=self.cfg.num_pi_trajs, max_h=max_h)
 			weight *= weight_decay
-			# planning_dict[planned_horizon] = planning_dict.get(planned_horizon, 0) + 1
-			# if planning_dict[planned_horizon] <= 3 and _ ==self.cfg.iterations-1:
-			# 	planned_horizon -= 1
-				# break
+
+			planning_dict[planned_horizon] = planning_dict.get(planned_horizon, 0) + 1
+		
 			value = value.nan_to_num(0)
 			elite_idxs = torch.topk(value.squeeze(1), self.cfg.num_elites, dim=0).indices
 			elite_value, elite_actions = value[elite_idxs], actions[:planned_horizon, elite_idxs]
@@ -268,7 +256,16 @@ class TDMPC2(torch.nn.Module):
 			score = score / score.sum(0)
 			mean[:planned_horizon] = (score.unsqueeze(0) * elite_actions).sum(dim=1) / (score.sum(0) + 1e-9)
 			std[:planned_horizon] = ((score.unsqueeze(0) * (elite_actions - mean[:planned_horizon].unsqueeze(1)) ** 2).sum(dim=1) / (score.sum(0) + 1e-9)).sqrt()
-			std = std.clamp(self.cfg.min_std, self.cfg.max_std)
+			std[:planned_horizon] = std[:planned_horizon].clamp(self.cfg.min_std, self.cfg.max_std)
+
+			# Update parameters for later horizons
+			max_value_pi = value_pi.max(0).values
+			# print(pi_actions.shape)
+			score_pi = torch.exp(self.cfg.temperature*(value_pi - max_value_pi))
+			score_pi = score_pi / score_pi.sum(0)
+			mean[planned_horizon:planned_horizon + max_h] = (score_pi.unsqueeze(0) * pi_actions[planned_horizon:planned_horizon + max_h]).sum(dim=1) / (score_pi.sum(0) + 1e-9)
+			std[planned_horizon:planned_horizon + max_h] = ((score_pi.unsqueeze(0) * (pi_actions[planned_horizon:planned_horizon + max_h] - mean[planned_horizon:planned_horizon + max_h].unsqueeze(1)) ** 2).sum(dim=1) / (score_pi.sum(0) + 1e-9)).sqrt()
+			std[planned_horizon:planned_horizon + max_h] = std[planned_horizon:planned_horizon + max_h].clamp(self.cfg.min_std, self.cfg.max_std)
 			if self.cfg.multitask:
 				mean = mean * self.model._action_masks[task]
 				std = std * self.model._action_masks[task]
@@ -282,8 +279,27 @@ class TDMPC2(torch.nn.Module):
 			a = a + std * torch.randn(self.cfg.action_dim, device=std.device)
 		self._prev_mean.copy_(mean)
 		# return a.clamp(-1, 1)
+		# print(planning_dict)h
 
-		return actions
+		# convert planning_dict to cumulative counts per horizon
+		sorted_horizon = sorted(planning_dict.keys(), reverse=True)
+		cumulative = 0
+		# print("before", planning_dict)
+		for h in sorted_horizon:
+			cumulative += planning_dict[h]
+			planning_dict[h] = cumulative
+		stable = sorted_horizon[0]
+		for h in sorted_horizon:
+			if planning_dict[h] >= 8:
+				stable = h
+				break
+		# print(sorted_horizon)
+		# print("after", planning_dict)
+		# print(stable)
+
+		# print("----------------")
+		return actions[:stable]
+
 
 	@torch.no_grad()
 	def _plan(self, obs, t0=False, eval_mode=False, task=None):
